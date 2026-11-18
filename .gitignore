@@ -1,0 +1,9 @@
+# Datos personales en claro. Nunca versionarlos.
+# El único dato que puede subirse es data/gastos.enc, ya cifrado.
+*.xlsx
+*.xls
+*.csv
+data/*.json
+data/*.xlsx
+tmp-data/
+.DS_Store
