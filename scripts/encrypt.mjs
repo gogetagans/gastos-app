@@ -1,3 +1,6 @@
+// Lee un xlsx (columnas Servicio, costes, y opcionales Titular y Reparto)
+// o un JSON con groups[].items[].owner ("daniel" | "lourdes" | "shared"),
+// split (porcentaje de Daniel si es compartido) y budgets, y escribe el sobre cifrado.
 import { webcrypto } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
