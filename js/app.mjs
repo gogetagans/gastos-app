@@ -6,10 +6,15 @@ import {
   deleteGroup,
   findItem,
   isActive,
+  itemVisible,
   markReviewed,
+  ownerLabel,
+  personShare,
+  setBudgets,
   setEndDate,
   summarize,
   updateExpense,
+  warningVisible,
 } from "./dataset.mjs";
 import {
   esc,
@@ -39,6 +44,7 @@ const state = {
   prevYearly: 0,
   enterId: null,
   flashId: null,
+  filter: "ambos",
 };
 
 const ICONS = {
@@ -185,6 +191,78 @@ function groupOptions(selected = "") {
     .join("")}</datalist>`;
 }
 
+function filterSwitch() {
+  const current = state.filter || "ambos";
+  return `<div class="seg" role="group" aria-label="Ver por titular">${[
+    ["ambos", "Ambos"],
+    ["daniel", "Daniel"],
+    ["lourdes", "Lourdes"],
+  ].map(([value, label]) => `<button type="button" class="seg-btn" data-action="filter" data-who="${value}" aria-pressed="${current === value}">${label}</button>`).join("")}</div>`;
+}
+
+function ownerChip(item) {
+  const share = personShare(item);
+  if (share.owner === "shared") {
+    const daniel = Math.round(share.split);
+    return `<span class="owner-chip" data-owner="shared">Compartido ${daniel}/${100 - daniel}</span>`;
+  }
+  return `<span class="owner-chip" data-owner="${share.owner}">${ownerLabel(share.owner)}</span>`;
+}
+
+function comparisonHtml(summary) {
+  const people = summary.people;
+  const rows = (summary.compareGroups || []).filter((group) => group.daniel > 0 || group.lourdes > 0);
+  const max = Math.max(1, ...rows.map((group) => Math.max(group.daniel, group.lourdes)));
+  const diff = people.difference;
+  const same = Math.abs(Math.round(diff * 100)) === 0;
+  const diffText = same
+    ? "Pagan lo mismo al mes."
+    : diff > 0
+      ? `Daniel paga ${formatEuro(diff)} más al mes (${formatEuro(diff * 12)} al año).`
+      : `Lourdes paga ${formatEuro(-diff)} más al mes (${formatEuro(-diff * 12)} al año).`;
+  const budgets = state.session.dataset.budgets || {};
+  const budgetValue = (value) => (value == null ? "" : String(value).replace(".", ","));
+  return `<section class="panel compare" id="comparacion">
+      <div class="panel-head">
+        <h2>Daniel y Lourdes</h2>
+        ${filterSwitch()}
+      </div>
+      <div class="compare-people">
+        <article data-owner="daniel">
+          <p class="eyebrow">Daniel</p>
+          <strong>${esc(formatEuro(people.daniel))}</strong>
+          <span>${esc(formatEuro(people.danielYear))} / año · ${Math.round(people.danielPct)} % del total</span>
+        </article>
+        <article data-owner="lourdes">
+          <p class="eyebrow">Lourdes</p>
+          <strong>${esc(formatEuro(people.lourdes))}</strong>
+          <span>${esc(formatEuro(people.lourdesYear))} / año · ${Math.round(people.lourdesPct)} % del total</span>
+        </article>
+      </div>
+      <p class="compare-diff">${esc(diffText)}</p>
+      <p class="compare-legend"><span class="dot daniel"></span> Daniel <span class="dot lourdes"></span> Lourdes</p>
+      <div class="compare-rows">${rows.length ? rows.map((group, index) => `<div class="compare-row">
+            <span class="compare-name">${esc(group.name)}</span>
+            <div class="pair" aria-hidden="true">
+              <span class="pair-track"><span class="pair-fill daniel" style="--w:${(group.daniel / max) * 100}%;--d:${index * 45}ms"></span></span>
+              <span class="pair-track"><span class="pair-fill lourdes" style="--w:${(group.lourdes / max) * 100}%;--d:${index * 45 + 70}ms"></span></span>
+            </div>
+            <span class="compare-amt">${esc(formatEuro(group.daniel))}</span>
+            <span class="compare-amt">${esc(formatEuro(group.lourdes))}</span>
+          </div>`).join("") : `<p class="empty">Todavía no hay gastos activos que comparar.</p>`}</div>
+      <form id="budget-form" class="budget-form">
+        <label class="field">Presupuesto de Daniel
+          <input id="budget-daniel" inputmode="decimal" placeholder="Sin tope" value="${esc(budgetValue(budgets.daniel))}">
+        </label>
+        <label class="field">Presupuesto de Lourdes
+          <input id="budget-lourdes" inputmode="decimal" placeholder="Sin tope" value="${esc(budgetValue(budgets.lourdes))}">
+        </label>
+        <button type="submit" class="btn btn-ghost">Guardar presupuestos</button>
+      </form>
+      <p class="hint">El presupuesto es mensual y opcional. Un gasto compartido se parte con el porcentaje de esa línea. Vacío quiere decir sin tope.</p>
+    </section>`;
+}
+
 function appHtml() {
   const { summary, warnings, session } = state;
   const dataset = session.dataset;
@@ -241,13 +319,19 @@ function appHtml() {
       </div>`
     : `<div class="panel panel-calm"><h2>${icon("check")} Sin incoherencias</h2><p>Importes, nombres, fechas y subtotales cuadran con las reglas de revisión.</p></div>`;
 
+  const filter = state.filter || "ambos";
   const cards = dataset.groups.length
     ? dataset.groups
       .map((group, index) => {
-        const stats = summary.groups[index];
-        const items = group.items
+        const visibleItems = group.items.filter((item) => itemVisible(item, filter));
+        if (filter !== "ambos" && visibleItems.length === 0) return "";
+        const stats = summary.groups.find((entry) => entry.id === group.id) || { monthly: 0, yearly: 0, daniel: 0, lourdes: 0 };
+        const items = visibleItems
           .map((item) => {
             const ended = !isActive(item, todayISO());
+            const share = personShare(item);
+            const shownMonthly = filter === "daniel" ? share.daniel : filter === "lourdes" ? share.lourdes : item.monthly;
+            const shownYearly = filter === "daniel" ? share.danielYear : filter === "lourdes" ? share.lourdesYear : item.yearly;
             const classes = [
               "item",
               ended ? "is-ended" : "",
@@ -258,12 +342,12 @@ function appHtml() {
               <div class="item-inner">
                 <div class="item-main">
                   <div>
-                    <h3>${esc(item.name)} ${ended ? '<span class="badge">De baja</span>' : ""}</h3>
-                    <p class="meta">${icon("calendar")} Alta ${esc(formatDate(item.startDate))} · Baja ${esc(formatDate(item.endDate))} · Cambio ${esc(formatDate(item.updatedAt))}</p>
+                    <h3>${esc(item.name)} ${ownerChip(item)} ${ended ? '<span class="badge">De baja</span>' : ""}</h3>
+                    <p class="meta">${icon("calendar")} Alta ${esc(formatDate(item.startDate))} · Baja ${esc(formatDate(item.endDate))} · Cambio ${esc(formatDate(item.updatedAt))}${share.owner === "shared" ? ` · Daniel ${esc(formatEuro(share.daniel))} · Lourdes ${esc(formatEuro(share.lourdes))}` : ""}</p>
                   </div>
                   <div class="item-money">
-                    <strong>${esc(formatEuro(item.monthly))}<span> / mes</span></strong>
-                    <span>${esc(formatEuro(item.yearly))} / año</span>
+                    <strong>${esc(formatEuro(shownMonthly))}<span> / mes</span></strong>
+                    <span>${esc(formatEuro(shownYearly))} / año</span>
                   </div>
                 </div>
                 <div class="item-actions">
@@ -280,7 +364,7 @@ function appHtml() {
         return `<section class="card" id="group-${esc(group.id)}" data-tone="${index % 8}">
           <header class="card-head">
             <div><p class="eyebrow">Grupo</p><h2>${esc(group.name)}</h2></div>
-            <div class="card-total"><span>Total / mes</span><strong>${esc(formatEuro(stats.monthly))}</strong><small>${esc(formatEuro(stats.yearly))} / año</small></div>
+            <div class="card-total"><span>Total / mes</span><strong>${esc(formatEuro(stats.monthly))}</strong><small>${esc(formatEuro(stats.yearly))} / año</small><small>Daniel ${esc(formatEuro(stats.daniel))} · Lourdes ${esc(formatEuro(stats.lourdes))}</small></div>
           </header>
           ${items || `<p class="empty">Este grupo está vacío.</p>`}
           ${group.items.length === 0 ? `<button type="button" class="btn btn-ghost" data-action="delete-group" data-id="${esc(group.id)}">Eliminar grupo</button>` : ""}
@@ -307,9 +391,10 @@ function appHtml() {
       ${banner ? `<p class="banner">${esc(banner)}</p>` : ""}
       <section class="hero">
         <div>
-          <p class="eyebrow">Total del mes</p>
+          <p class="eyebrow">${filter === "daniel" ? "Parte de Daniel" : filter === "lourdes" ? "Parte de Lourdes" : "Total del mes"}</p>
           <p class="total-figure" data-count="month" aria-live="polite">${esc(formatEuro(state.prevMonthly))}</p>
           <p class="total-side">Total año <strong data-count="year">${esc(formatEuro(state.prevYearly))}</strong> <span>total mes × 12</span></p>
+          ${filter !== "ambos" ? `<p class="hint">Total de la casa: ${esc(formatEuro(summary.householdMonthly))} al mes.</p>` : ""}
           ${yearDiff ? `<p class="hint">La suma de los costes anuales de cada línea es ${esc(formatEuro(summary.yearlyItems))}.</p>` : ""}
         </div>
         <div class="hero-chart">
@@ -317,6 +402,7 @@ function appHtml() {
           <p class="hint">${summary.activeCount} activos · ${summary.itemCount - summary.activeCount} de baja · ${dataset.groups.length} grupos. Los totales se recalculan al momento.</p>
         </div>
       </section>
+      ${comparisonHtml(summary)}
       <div class="split">
         ${warningHtml}
         <section class="panel">
@@ -332,8 +418,8 @@ function appHtml() {
 
 function paint() {
   const today = todayISO();
-  state.summary = summarize(state.session.dataset, today);
-  state.warnings = collectWarnings(state.session.dataset, today);
+  state.summary = summarize(state.session.dataset, today, state.filter || "ambos");
+  state.warnings = collectWarnings(state.session.dataset, today).filter((warning) => warningVisible(warning, state.filter || "ambos"));
   const html = appHtml();
   state.enterId = null;
   state.flashId = null;
@@ -429,6 +515,16 @@ function expenseForm(item) {
     <label class="field">Importe
       <input name="amount" required inputmode="decimal" value="${esc(amountText)}" placeholder="0,00">
     </label>
+    <fieldset class="choice">
+      <legend>Titular</legend>
+      <label><input type="radio" name="owner" value="daniel" ${(item?.owner || "daniel") === "daniel" ? "checked" : ""}> Daniel</label>
+      <label><input type="radio" name="owner" value="lourdes" ${item?.owner === "lourdes" ? "checked" : ""}> Lourdes</label>
+      <label><input type="radio" name="owner" value="shared" ${item?.owner === "shared" ? "checked" : ""}> Compartido</label>
+    </fieldset>
+    <label class="field" id="split-field" ${item?.owner === "shared" ? "" : "hidden"}>Parte de Daniel (%)
+      <input name="split" inputmode="decimal" value="${esc(String(item?.owner === "shared" ? item.split ?? 50 : 50).replace(".", ","))}">
+      <span class="hint" id="split-hint"></span>
+    </label>
     <div class="dates">
       <label class="field">Alta
         <input name="start" type="date" value="${esc(item?.startDate || "")}">
@@ -457,6 +553,8 @@ function formPayload(form) {
   const amount = parseAmount(form.amount.value);
   const startDate = form.start.value || null;
   const endDate = form.end.value || null;
+  const owner = form.owner?.value === "lourdes" || form.owner?.value === "shared" ? form.owner.value : "daniel";
+  const split = owner === "shared" ? parseAmount(form.split?.value) : null;
   const errors = [];
   if (!name) errors.push("Escribe un nombre.");
   if (name.length > 80) errors.push("El nombre es demasiado largo.");
@@ -465,7 +563,8 @@ function formPayload(form) {
   else if (amount < 0) errors.push("El importe tiene que ser cero o mayor.");
   else if (amount > 10000000) errors.push("El importe es demasiado grande.");
   if (startDate && endDate && endDate < startDate) errors.push("La baja es anterior al alta.");
-  return { name, group, basis, amount, startDate, endDate, errors };
+  if (owner === "shared" && (split == null || split < 0 || split > 100)) errors.push("El reparto de Daniel es un porcentaje entre 0 y 100.");
+  return { name, group, basis, amount, startDate, endDate, owner, split, errors };
 }
 
 function updatePreview() {
@@ -473,12 +572,28 @@ function updatePreview() {
   const preview = document.getElementById("amount-preview");
   if (!form || !preview) return;
   const { basis, amount } = formPayload(form);
+  const owner = form.owner?.value === "lourdes" || form.owner?.value === "shared" ? form.owner.value : "daniel";
+  const splitField = document.getElementById("split-field");
+  if (splitField) splitField.hidden = owner !== "shared";
   if (amount == null || amount < 0) {
     preview.textContent = "El total del mes se actualiza al guardar.";
     return;
   }
   const monthly = basis === "yearly" ? amount / 12 : amount;
-  preview.textContent = `Sumará ${formatEuro(monthly)} al mes y ${formatEuro(basis === "yearly" ? amount : amount * 12)} al año.`;
+  const yearly = basis === "yearly" ? amount : amount * 12;
+  if (owner === "shared") {
+    const split = parseAmount(form.split?.value);
+    const danielPart = split == null ? null : Math.min(100, Math.max(0, split));
+    const hint = document.getElementById("split-hint");
+    if (hint && danielPart != null) hint.textContent = `Lourdes se queda con ${String(100 - danielPart).replace(".", ",")} %.`;
+    if (danielPart == null) {
+      preview.textContent = "El reparto es el porcentaje de Daniel.";
+      return;
+    }
+    preview.textContent = `Daniel ${formatEuro(monthly * danielPart / 100)} al mes y Lourdes ${formatEuro(monthly * (100 - danielPart) / 100)}. En total, ${formatEuro(monthly)} al mes y ${formatEuro(yearly)} al año.`;
+    return;
+  }
+  preview.textContent = `${ownerLabel(owner)} sumará ${formatEuro(monthly)} al mes y ${formatEuro(yearly)} al año.`;
 }
 
 async function commit(mutator) {
@@ -532,6 +647,7 @@ function lock() {
   state.prevMonthly = 0;
   state.prevYearly = 0;
   state.forceSetup = false;
+  state.filter = "ambos";
   paintGate();
 }
 
@@ -696,6 +812,31 @@ async function onSubmit(event) {
     }
     return;
   }
+  if (form.id === "budget-form") {
+    event.preventDefault();
+    if (!state.session) return;
+    const daniel = parseAmount(document.getElementById("budget-daniel").value);
+    const lourdes = parseAmount(document.getElementById("budget-lourdes").value);
+    const danielEmpty = document.getElementById("budget-daniel").value.trim() === "";
+    const lourdesEmpty = document.getElementById("budget-lourdes").value.trim() === "";
+    if (!danielEmpty && (daniel == null || daniel < 0)) {
+      toast("El presupuesto de Daniel no es un importe válido.");
+      return;
+    }
+    if (!lourdesEmpty && (lourdes == null || lourdes < 0)) {
+      toast("El presupuesto de Lourdes no es un importe válido.");
+      return;
+    }
+    const saved = await commit((dataset) => setBudgets(dataset, {
+      daniel: danielEmpty ? null : daniel,
+      lourdes: lourdesEmpty ? null : lourdes,
+    }, nowISO()));
+    if (saved) {
+      paint();
+      toast("Presupuestos guardados.");
+    }
+    return;
+  }
   if (form.id === "expense-form") {
     event.preventDefault();
     const payload = formPayload(form);
@@ -726,6 +867,11 @@ async function onClick(event) {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   const action = button.dataset.action;
+  if (action === "filter") {
+    state.filter = button.dataset.who || "ambos";
+    if (state.session) paint();
+    return;
+  }
   if (action === "theme") {
     applyTheme(button.dataset.mode);
     document.querySelectorAll(".seg-btn").forEach((el) => {
@@ -1000,7 +1146,7 @@ function bind() {
       const name = document.getElementById("setup-file-name");
       if (name) name.textContent = event.target.files?.[0]?.name || "Hoja con columnas Servicio, Coste / mes y Coste / año.";
     }
-    if (event.target.name === "basis") updatePreview();
+    if (event.target.name === "basis" || event.target.name === "owner" || event.target.name === "split") updatePreview();
   });
   ["pointerdown", "keydown", "touchstart", "scroll"].forEach((type) => {
     window.addEventListener(type, poke, { passive: true });

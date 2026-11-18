@@ -61,6 +61,8 @@ function itemFromCells({ name, monthly, yearly, monthCell, yearCell }) {
     basis,
     monthly: month,
     yearly: year,
+    owner: "daniel",
+    split: 100,
     startDate: null,
     endDate: null,
     updatedAt: null,
@@ -71,13 +73,63 @@ export function isActive(item, today) {
   return !(item.endDate && item.endDate <= today);
 }
 
+export function normalizeOwner(value) {
+  const name = fold(value || "");
+  if (name === "lourdes") return "lourdes";
+  if (name === "compartido" || name === "compartida" || name === "shared") return "shared";
+  return "daniel";
+}
+
+export function normalizeSplit(value, owner) {
+  if (owner !== "shared") return owner === "lourdes" ? 0 : 100;
+  if (typeof value === "number" && Number.isFinite(value)) return Math.min(100, Math.max(0, value));
+  const match = String(value ?? "").match(/(\d+(?:[.,]\d+)?)/);
+  if (!match) return 50;
+  return Math.min(100, Math.max(0, Number(match[1].replace(",", "."))));
+}
+
+export function ownerLabel(owner) {
+  if (owner === "lourdes") return "Lourdes";
+  if (owner === "shared") return "Compartido";
+  return "Daniel";
+}
+
+export function personShare(item) {
+  const owner = item?.owner === "lourdes" || item?.owner === "shared" ? item.owner : "daniel";
+  const split = normalizeSplit(item?.split, owner);
+  const ratio = split / 100;
+  const monthly = Number(item?.monthly) || 0;
+  const yearly = Number(item?.yearly) || 0;
+  return {
+    owner,
+    split,
+    daniel: monthly * ratio,
+    lourdes: monthly * (1 - ratio),
+    danielYear: yearly * ratio,
+    lourdesYear: yearly * (1 - ratio),
+  };
+}
+
+export function itemVisible(item, filter) {
+  if (!filter || filter === "ambos") return true;
+  const owner = item?.owner === "lourdes" || item?.owner === "shared" ? item.owner : "daniel";
+  if (filter === "lourdes") return owner === "lourdes" || owner === "shared";
+  return owner === "daniel" || owner === "shared";
+}
+
+export function warningVisible(warning, filter) {
+  if (!filter || filter === "ambos") return true;
+  if (!warning.owners || warning.owners.length === 0) return true;
+  return warning.owners.includes(filter);
+}
+
 export function datasetFromRows(rows, options = {}) {
-  const col = { name: 0, month: 1, year: 2, sub: 3, start: -1, end: -1, updated: -1 };
+  const col = { name: 0, month: 1, year: 2, sub: 3, start: -1, end: -1, updated: -1, owner: -1, split: -1 };
   let headerIndex = -1;
   const scan = Math.min(rows.length, 40);
   for (let r = 0; r < scan; r += 1) {
     const row = rows[r] || [];
-    const found = { name: -1, month: -1, year: -1, sub: -1, start: -1, end: -1, updated: -1 };
+    const found = { name: -1, month: -1, year: -1, sub: -1, start: -1, end: -1, updated: -1, owner: -1, split: -1 };
     for (let c = 0; c < row.length; c += 1) {
       const text = fold(cellText(row[c]));
       if (!text) continue;
@@ -88,6 +140,8 @@ export function datasetFromRows(rows, options = {}) {
       else if (text === "alta" || text === "fecha alta" || text === "inicio") found.start = c;
       else if (text === "baja" || text === "fecha baja" || text === "fin") found.end = c;
       else if (text === "ultimo cambio" || text === "cambio" || text === "actualizado") found.updated = c;
+      else if (text === "titular" || text === "propietario") found.owner = c;
+      else if (text === "reparto" || text.startsWith("reparto") || text === "parte daniel" || text.startsWith("parte daniel")) found.split = c;
     }
     if (found.name !== -1 && (found.month !== -1 || found.year !== -1)) {
       headerIndex = r;
@@ -147,6 +201,8 @@ export function datasetFromRows(rows, options = {}) {
       const raw = row[col.updated]?.v;
       item.updatedAt = typeof raw === "string" && raw.includes("T") ? raw : coerceDate(raw);
     }
+    if (col.owner >= 0) item.owner = normalizeOwner(cellText(row[col.owner]));
+    item.split = normalizeSplit(col.split >= 0 ? row[col.split]?.v : null, item.owner);
     current.items.push(item);
   }
 
@@ -215,11 +271,13 @@ export function aoaFromDataset(dataset, today) {
     "Alta",
     "Baja",
     "Último cambio",
+    "Titular",
+    "Reparto",
   ]];
   const activeRefs = [];
 
   dataset.groups.forEach((group) => {
-    lines.push([group.name, null, null, null, null, null, null]);
+    lines.push([group.name, null, null, null, null, null, null, null, null]);
     const ownRefs = [];
     let firstExcel = null;
     let lastExcel = null;
@@ -248,6 +306,8 @@ export function aoaFromDataset(dataset, today) {
         item.startDate || null,
         item.endDate || null,
         updated,
+        ownerLabel(item.owner),
+        item.owner === "shared" ? normalizeSplit(item.split, "shared") : null,
       ]);
       if (isActive(item, today)) {
         ownRefs.push(`B${excelRow}`);
@@ -262,7 +322,7 @@ export function aoaFromDataset(dataset, today) {
     }
   });
 
-  lines.push([null, null, null, null, null, null, null]);
+  lines.push([null, null, null, null, null, null, null, null, null]);
   const monthly = dataset.groups.reduce(
     (sum, group) => sum + group.items.filter((item) => isActive(item, today)).reduce((inner, item) => inner + Number(item.monthly || 0), 0),
     0,
@@ -271,6 +331,8 @@ export function aoaFromDataset(dataset, today) {
   lines.push([
     "Total",
     activeRefs.length ? moneyCell(monthly, sumFormula(activeRefs)) : moneyCell(0),
+    null,
+    null,
     null,
     null,
     null,
@@ -285,30 +347,93 @@ export function aoaFromDataset(dataset, today) {
     null,
     null,
     null,
+    null,
+    null,
   ]);
   return lines;
 }
 
-export function summarize(dataset, today) {
-  const groups = dataset.groups.map((group) => {
+export function summarize(dataset, today, filter = "ambos") {
+  const groups = [];
+  const compareGroups = [];
+  let daniel = 0;
+  let lourdes = 0;
+  let householdMonthly = 0;
+  let householdYearly = 0;
+  let activeCount = 0;
+  let itemCount = 0;
+  dataset.groups.forEach((group) => {
     const active = group.items.filter((item) => isActive(item, today));
-    return {
+    let groupDaniel = 0;
+    let groupLourdes = 0;
+    let groupMonthly = 0;
+    let groupYearly = 0;
+    let visibleActive = 0;
+    active.forEach((item) => {
+      const share = personShare(item);
+      groupDaniel += share.daniel;
+      groupLourdes += share.lourdes;
+      daniel += share.daniel;
+      lourdes += share.lourdes;
+      householdMonthly += Number(item.monthly) || 0;
+      householdYearly += Number(item.yearly) || 0;
+      if (!itemVisible(item, filter)) return;
+      visibleActive += 1;
+      if (filter === "daniel") {
+        groupMonthly += share.daniel;
+        groupYearly += share.danielYear;
+      } else if (filter === "lourdes") {
+        groupMonthly += share.lourdes;
+        groupYearly += share.lourdesYear;
+      } else {
+        groupMonthly += Number(item.monthly) || 0;
+        groupYearly += Number(item.yearly) || 0;
+      }
+    });
+    const visibleItems = group.items.filter((item) => itemVisible(item, filter));
+    itemCount += filter === "ambos" ? group.items.length : visibleItems.length;
+    activeCount += visibleActive;
+    compareGroups.push({
       id: group.id,
       name: group.name,
-      monthly: active.reduce((sum, item) => sum + Number(item.monthly || 0), 0),
-      yearly: active.reduce((sum, item) => sum + Number(item.yearly || 0), 0),
-      activeCount: active.length,
-      itemCount: group.items.length,
-    };
+      daniel: groupDaniel,
+      lourdes: groupLourdes,
+    });
+    if (filter !== "ambos" && visibleItems.length === 0) return;
+    groups.push({
+      id: group.id,
+      name: group.name,
+      monthly: groupMonthly,
+      yearly: groupYearly,
+      daniel: groupDaniel,
+      lourdes: groupLourdes,
+      activeCount: visibleActive,
+      itemCount: filter === "ambos" ? group.items.length : visibleItems.length,
+    });
   });
-  const monthly = groups.reduce((sum, group) => sum + group.monthly, 0);
+  const monthly = filter === "daniel" ? daniel : filter === "lourdes" ? lourdes : householdMonthly;
+  const yearlyItems = groups.reduce((sum, group) => sum + group.yearly, 0);
+  const totalPeople = daniel + lourdes;
   return {
     monthly,
     yearlySheet: monthly * 12,
-    yearlyItems: groups.reduce((sum, group) => sum + group.yearly, 0),
+    yearlyItems,
+    householdMonthly,
+    householdYearlySheet: householdMonthly * 12,
     groups,
-    activeCount: groups.reduce((sum, group) => sum + group.activeCount, 0),
-    itemCount: groups.reduce((sum, group) => sum + group.itemCount, 0),
+    activeCount,
+    itemCount,
+    people: {
+      daniel,
+      lourdes,
+      danielYear: daniel * 12,
+      lourdesYear: lourdes * 12,
+      total: totalPeople,
+      difference: daniel - lourdes,
+      danielPct: totalPeople > 0 ? (daniel / totalPeople) * 100 : 0,
+      lourdesPct: totalPeople > 0 ? (lourdes / totalPeople) * 100 : 0,
+    },
+    compareGroups,
   };
 }
 
@@ -338,12 +463,15 @@ export function collectWarnings(dataset, today) {
       const key = fold(item.name);
       if (!byName.has(key)) byName.set(key, []);
       byName.get(key).push(item);
+      const who = ownerLabel(item.owner);
+      const owners = item.owner === "shared" ? ["daniel", "lourdes"] : [item.owner === "lourdes" ? "lourdes" : "daniel"];
       if (cents(item.monthly) === 0) {
         warnings.push({
           id: `zero:${item.id}`,
           code: "zero",
           itemId: item.id,
-          message: `${item.name} está a ${formatEuro(0)} al mes.`,
+          owners,
+          message: `${item.name} (${who}) está a ${formatEuro(0)} al mes.`,
         });
       }
       if (Math.abs(cents(item.monthly * 12) - cents(item.yearly)) > 1) {
@@ -351,7 +479,8 @@ export function collectWarnings(dataset, today) {
           id: `mismatch:${item.id}`,
           code: "mismatch",
           itemId: item.id,
-          message: `${item.name}: ${formatEuro(item.monthly)} al mes × 12 = ${formatEuro(item.monthly * 12)}, y el coste anual es ${formatEuro(item.yearly)}.`,
+          owners,
+          message: `${item.name} (${who}): ${formatEuro(item.monthly)} al mes × 12 = ${formatEuro(item.monthly * 12)}, y el coste anual es ${formatEuro(item.yearly)}.`,
         });
       }
       if (item.endDate && item.endDate <= today) {
@@ -359,7 +488,8 @@ export function collectWarnings(dataset, today) {
           id: `ended:${item.id}`,
           code: "ended",
           itemId: item.id,
-          message: `${item.name} tiene la baja el ${formatDate(item.endDate)} y ya no entra en los totales.`,
+          owners,
+          message: `${item.name} (${who}) tiene la baja el ${formatDate(item.endDate)} y ya no entra en los totales.`,
         });
       }
     });
@@ -367,10 +497,12 @@ export function collectWarnings(dataset, today) {
 
   byName.forEach((items) => {
     if (items.length < 2) return;
+    const owners = [...new Set(items.flatMap((item) => (item.owner === "shared" ? ["daniel", "lourdes"] : [item.owner === "lourdes" ? "lourdes" : "daniel"])))];
     warnings.push({
       id: `duplicate:${fold(items[0].name)}`,
       code: "duplicate",
       itemId: items[0].id,
+      owners,
       message: `El nombre «${items[0].name}» está repetido ${items.length} veces.`,
     });
   });
@@ -406,6 +538,21 @@ export function collectWarnings(dataset, today) {
     });
   }
 
+  const spent = summarize(dataset, today, "ambos").people;
+  ["daniel", "lourdes"].forEach((person) => {
+    const cap = dataset.budgets?.[person];
+    if (cap == null || !Number.isFinite(Number(cap))) return;
+    const amount = spent[person];
+    if (cents(amount) > cents(cap)) {
+      warnings.push({
+        id: `budget:${person}`,
+        code: "budget",
+        owners: [person],
+        message: `${ownerLabel(person)} supera el presupuesto mensual: ${formatEuro(amount)} de ${formatEuro(cap)}.`,
+      });
+    }
+  });
+
   if (!dataset.reviewedAt) {
     warnings.push({
       id: "stale",
@@ -430,6 +577,8 @@ function blankItem(partial) {
     basis: partial.basis === "yearly" || partial.basis === "both" ? partial.basis : "monthly",
     monthly: Number(partial.monthly) || 0,
     yearly: partial.yearly == null ? (Number(partial.monthly) || 0) * 12 : Number(partial.yearly) || 0,
+    owner: normalizeOwner(partial.owner),
+    split: normalizeSplit(partial.split, normalizeOwner(partial.owner)),
     startDate: coerceDate(partial.startDate),
     endDate: coerceDate(partial.endDate),
     updatedAt: partial.updatedAt || null,
@@ -462,6 +611,10 @@ export function normalizeDataset(input) {
   if (input.declaredYearlyTotal != null && Number.isFinite(Number(input.declaredYearlyTotal))) {
     dataset.declaredYearlyTotal = Number(input.declaredYearlyTotal);
   }
+  dataset.budgets = {
+    daniel: budgetOrNull(input.budgets?.daniel),
+    lourdes: budgetOrNull(input.budgets?.lourdes),
+  };
   return dataset;
 }
 
@@ -480,6 +633,18 @@ function clearGrand(dataset) {
 
 function clearDeclared(group) {
   delete group.declaredSubtotal;
+}
+
+function budgetOrNull(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return null;
+  return number;
+}
+
+function applyOwner(item, input) {
+  item.owner = normalizeOwner(input.owner);
+  item.split = normalizeSplit(input.split, item.owner);
 }
 
 function applyAmount(item, basis, amount) {
@@ -515,7 +680,10 @@ export function addExpense(dataset, input, nowIso) {
     startDate: input.startDate || null,
     endDate: input.endDate || null,
     updatedAt: nowIso,
+    owner: "daniel",
+    split: 100,
   };
+  applyOwner(item, input);
   applyAmount(item, input.basis, input.amount);
   group.items.push(item);
   clearDeclared(group);
@@ -533,6 +701,7 @@ export function updateExpense(dataset, itemId, input, nowIso) {
   found.item.startDate = input.startDate || null;
   found.item.endDate = input.endDate || null;
   found.item.updatedAt = nowIso;
+  applyOwner(found.item, input);
   applyAmount(found.item, input.basis, input.amount);
   if (target !== found.group) {
     found.group.items = found.group.items.filter((item) => item.id !== itemId);
@@ -570,5 +739,13 @@ export function deleteGroup(dataset, groupId, nowIso) {
 
 export function markReviewed(dataset, today, nowIso) {
   dataset.reviewedAt = today;
+  dataset.updatedAt = nowIso;
+}
+
+export function setBudgets(dataset, budgets, nowIso) {
+  dataset.budgets = {
+    daniel: budgetOrNull(budgets.daniel),
+    lourdes: budgetOrNull(budgets.lourdes),
+  };
   dataset.updatedAt = nowIso;
 }

@@ -267,6 +267,8 @@
       basis,
       monthly: month,
       yearly: year,
+      owner: "daniel",
+      split: 100,
       startDate: null,
       endDate: null,
       updatedAt: null
@@ -275,13 +277,57 @@
   function isActive(item, today) {
     return !(item.endDate && item.endDate <= today);
   }
+  function normalizeOwner(value) {
+    const name = fold(value || "");
+    if (name === "lourdes") return "lourdes";
+    if (name === "compartido" || name === "compartida" || name === "shared") return "shared";
+    return "daniel";
+  }
+  function normalizeSplit(value, owner) {
+    if (owner !== "shared") return owner === "lourdes" ? 0 : 100;
+    if (typeof value === "number" && Number.isFinite(value)) return Math.min(100, Math.max(0, value));
+    const match = String(value ?? "").match(/(\d+(?:[.,]\d+)?)/);
+    if (!match) return 50;
+    return Math.min(100, Math.max(0, Number(match[1].replace(",", "."))));
+  }
+  function ownerLabel(owner) {
+    if (owner === "lourdes") return "Lourdes";
+    if (owner === "shared") return "Compartido";
+    return "Daniel";
+  }
+  function personShare(item) {
+    const owner = item?.owner === "lourdes" || item?.owner === "shared" ? item.owner : "daniel";
+    const split = normalizeSplit(item?.split, owner);
+    const ratio = split / 100;
+    const monthly = Number(item?.monthly) || 0;
+    const yearly = Number(item?.yearly) || 0;
+    return {
+      owner,
+      split,
+      daniel: monthly * ratio,
+      lourdes: monthly * (1 - ratio),
+      danielYear: yearly * ratio,
+      lourdesYear: yearly * (1 - ratio)
+    };
+  }
+  function itemVisible(item, filter) {
+    if (!filter || filter === "ambos") return true;
+    const owner = item?.owner === "lourdes" || item?.owner === "shared" ? item.owner : "daniel";
+    if (filter === "lourdes") return owner === "lourdes" || owner === "shared";
+    return owner === "daniel" || owner === "shared";
+  }
+  function warningVisible(warning, filter) {
+    if (!filter || filter === "ambos") return true;
+    if (!warning.owners || warning.owners.length === 0) return true;
+    return warning.owners.includes(filter);
+  }
   function datasetFromRows(rows, options = {}) {
-    const col = { name: 0, month: 1, year: 2, sub: 3, start: -1, end: -1, updated: -1 };
+    const col = { name: 0, month: 1, year: 2, sub: 3, start: -1, end: -1, updated: -1, owner: -1, split: -1 };
     let headerIndex = -1;
     const scan = Math.min(rows.length, 40);
     for (let r = 0; r < scan; r += 1) {
       const row = rows[r] || [];
-      const found = { name: -1, month: -1, year: -1, sub: -1, start: -1, end: -1, updated: -1 };
+      const found = { name: -1, month: -1, year: -1, sub: -1, start: -1, end: -1, updated: -1, owner: -1, split: -1 };
       for (let c = 0; c < row.length; c += 1) {
         const text = fold(cellText(row[c]));
         if (!text) continue;
@@ -292,6 +338,8 @@
         else if (text === "alta" || text === "fecha alta" || text === "inicio") found.start = c;
         else if (text === "baja" || text === "fecha baja" || text === "fin") found.end = c;
         else if (text === "ultimo cambio" || text === "cambio" || text === "actualizado") found.updated = c;
+        else if (text === "titular" || text === "propietario") found.owner = c;
+        else if (text === "reparto" || text.startsWith("reparto") || text === "parte daniel" || text.startsWith("parte daniel")) found.split = c;
       }
       if (found.name !== -1 && (found.month !== -1 || found.year !== -1)) {
         headerIndex = r;
@@ -346,6 +394,8 @@
         const raw = row[col.updated]?.v;
         item.updatedAt = typeof raw === "string" && raw.includes("T") ? raw : coerceDate(raw);
       }
+      if (col.owner >= 0) item.owner = normalizeOwner(cellText(row[col.owner]));
+      item.split = normalizeSplit(col.split >= 0 ? row[col.split]?.v : null, item.owner);
       current.items.push(item);
     }
     const dataset = {
@@ -408,11 +458,13 @@
       "Total / mes",
       "Alta",
       "Baja",
-      "\xDAltimo cambio"
+      "\xDAltimo cambio",
+      "Titular",
+      "Reparto"
     ]];
     const activeRefs = [];
     dataset.groups.forEach((group) => {
-      lines.push([group.name, null, null, null, null, null, null]);
+      lines.push([group.name, null, null, null, null, null, null, null, null]);
       const ownRefs = [];
       let firstExcel = null;
       let lastExcel = null;
@@ -440,7 +492,9 @@
           null,
           item.startDate || null,
           item.endDate || null,
-          updated
+          updated,
+          ownerLabel(item.owner),
+          item.owner === "shared" ? normalizeSplit(item.split, "shared") : null
         ]);
         if (isActive(item, today)) {
           ownRefs.push(`B${excelRow}`);
@@ -452,7 +506,7 @@
         lines[firstExcel - 1][3] = moneyCell(subtotal, sumFormula(ownRefs));
       }
     });
-    lines.push([null, null, null, null, null, null, null]);
+    lines.push([null, null, null, null, null, null, null, null, null]);
     const monthly = dataset.groups.reduce(
       (sum, group) => sum + group.items.filter((item) => isActive(item, today)).reduce((inner, item) => inner + Number(item.monthly || 0), 0),
       0
@@ -461,6 +515,8 @@
     lines.push([
       "Total",
       activeRefs.length ? moneyCell(monthly, sumFormula(activeRefs)) : moneyCell(0),
+      null,
+      null,
       null,
       null,
       null,
@@ -474,30 +530,93 @@
       null,
       null,
       null,
+      null,
+      null,
       null
     ]);
     return lines;
   }
-  function summarize(dataset, today) {
-    const groups = dataset.groups.map((group) => {
+  function summarize(dataset, today, filter = "ambos") {
+    const groups = [];
+    const compareGroups = [];
+    let daniel = 0;
+    let lourdes = 0;
+    let householdMonthly = 0;
+    let householdYearly = 0;
+    let activeCount = 0;
+    let itemCount = 0;
+    dataset.groups.forEach((group) => {
       const active = group.items.filter((item) => isActive(item, today));
-      return {
+      let groupDaniel = 0;
+      let groupLourdes = 0;
+      let groupMonthly = 0;
+      let groupYearly = 0;
+      let visibleActive = 0;
+      active.forEach((item) => {
+        const share = personShare(item);
+        groupDaniel += share.daniel;
+        groupLourdes += share.lourdes;
+        daniel += share.daniel;
+        lourdes += share.lourdes;
+        householdMonthly += Number(item.monthly) || 0;
+        householdYearly += Number(item.yearly) || 0;
+        if (!itemVisible(item, filter)) return;
+        visibleActive += 1;
+        if (filter === "daniel") {
+          groupMonthly += share.daniel;
+          groupYearly += share.danielYear;
+        } else if (filter === "lourdes") {
+          groupMonthly += share.lourdes;
+          groupYearly += share.lourdesYear;
+        } else {
+          groupMonthly += Number(item.monthly) || 0;
+          groupYearly += Number(item.yearly) || 0;
+        }
+      });
+      const visibleItems = group.items.filter((item) => itemVisible(item, filter));
+      itemCount += filter === "ambos" ? group.items.length : visibleItems.length;
+      activeCount += visibleActive;
+      compareGroups.push({
         id: group.id,
         name: group.name,
-        monthly: active.reduce((sum, item) => sum + Number(item.monthly || 0), 0),
-        yearly: active.reduce((sum, item) => sum + Number(item.yearly || 0), 0),
-        activeCount: active.length,
-        itemCount: group.items.length
-      };
+        daniel: groupDaniel,
+        lourdes: groupLourdes
+      });
+      if (filter !== "ambos" && visibleItems.length === 0) return;
+      groups.push({
+        id: group.id,
+        name: group.name,
+        monthly: groupMonthly,
+        yearly: groupYearly,
+        daniel: groupDaniel,
+        lourdes: groupLourdes,
+        activeCount: visibleActive,
+        itemCount: filter === "ambos" ? group.items.length : visibleItems.length
+      });
     });
-    const monthly = groups.reduce((sum, group) => sum + group.monthly, 0);
+    const monthly = filter === "daniel" ? daniel : filter === "lourdes" ? lourdes : householdMonthly;
+    const yearlyItems = groups.reduce((sum, group) => sum + group.yearly, 0);
+    const totalPeople = daniel + lourdes;
     return {
       monthly,
       yearlySheet: monthly * 12,
-      yearlyItems: groups.reduce((sum, group) => sum + group.yearly, 0),
+      yearlyItems,
+      householdMonthly,
+      householdYearlySheet: householdMonthly * 12,
       groups,
-      activeCount: groups.reduce((sum, group) => sum + group.activeCount, 0),
-      itemCount: groups.reduce((sum, group) => sum + group.itemCount, 0)
+      activeCount,
+      itemCount,
+      people: {
+        daniel,
+        lourdes,
+        danielYear: daniel * 12,
+        lourdesYear: lourdes * 12,
+        total: totalPeople,
+        difference: daniel - lourdes,
+        danielPct: totalPeople > 0 ? daniel / totalPeople * 100 : 0,
+        lourdesPct: totalPeople > 0 ? lourdes / totalPeople * 100 : 0
+      },
+      compareGroups
     };
   }
   function collectWarnings(dataset, today) {
@@ -525,12 +644,15 @@
         const key = fold(item.name);
         if (!byName.has(key)) byName.set(key, []);
         byName.get(key).push(item);
+        const who = ownerLabel(item.owner);
+        const owners = item.owner === "shared" ? ["daniel", "lourdes"] : [item.owner === "lourdes" ? "lourdes" : "daniel"];
         if (cents(item.monthly) === 0) {
           warnings.push({
             id: `zero:${item.id}`,
             code: "zero",
             itemId: item.id,
-            message: `${item.name} est\xE1 a ${formatEuro(0)} al mes.`
+            owners,
+            message: `${item.name} (${who}) est\xE1 a ${formatEuro(0)} al mes.`
           });
         }
         if (Math.abs(cents(item.monthly * 12) - cents(item.yearly)) > 1) {
@@ -538,7 +660,8 @@
             id: `mismatch:${item.id}`,
             code: "mismatch",
             itemId: item.id,
-            message: `${item.name}: ${formatEuro(item.monthly)} al mes \xD7 12 = ${formatEuro(item.monthly * 12)}, y el coste anual es ${formatEuro(item.yearly)}.`
+            owners,
+            message: `${item.name} (${who}): ${formatEuro(item.monthly)} al mes \xD7 12 = ${formatEuro(item.monthly * 12)}, y el coste anual es ${formatEuro(item.yearly)}.`
           });
         }
         if (item.endDate && item.endDate <= today) {
@@ -546,17 +669,20 @@
             id: `ended:${item.id}`,
             code: "ended",
             itemId: item.id,
-            message: `${item.name} tiene la baja el ${formatDate(item.endDate)} y ya no entra en los totales.`
+            owners,
+            message: `${item.name} (${who}) tiene la baja el ${formatDate(item.endDate)} y ya no entra en los totales.`
           });
         }
       });
     });
     byName.forEach((items) => {
       if (items.length < 2) return;
+      const owners = [...new Set(items.flatMap((item) => item.owner === "shared" ? ["daniel", "lourdes"] : [item.owner === "lourdes" ? "lourdes" : "daniel"]))];
       warnings.push({
         id: `duplicate:${fold(items[0].name)}`,
         code: "duplicate",
         itemId: items[0].id,
+        owners,
         message: `El nombre \xAB${items[0].name}\xBB est\xE1 repetido ${items.length} veces.`
       });
     });
@@ -589,6 +715,20 @@
         message: `La fila Total A\xF1o de la hoja indica ${formatEuro(dataset.declaredYearlyTotal)} y no coincide con el total mensual \xD7 12.`
       });
     }
+    const spent = summarize(dataset, today, "ambos").people;
+    ["daniel", "lourdes"].forEach((person) => {
+      const cap = dataset.budgets?.[person];
+      if (cap == null || !Number.isFinite(Number(cap))) return;
+      const amount = spent[person];
+      if (cents(amount) > cents(cap)) {
+        warnings.push({
+          id: `budget:${person}`,
+          code: "budget",
+          owners: [person],
+          message: `${ownerLabel(person)} supera el presupuesto mensual: ${formatEuro(amount)} de ${formatEuro(cap)}.`
+        });
+      }
+    });
     if (!dataset.reviewedAt) {
       warnings.push({
         id: "stale",
@@ -617,6 +757,16 @@
   }
   function clearDeclared(group) {
     delete group.declaredSubtotal;
+  }
+  function budgetOrNull(value) {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return null;
+    return number;
+  }
+  function applyOwner(item, input) {
+    item.owner = normalizeOwner(input.owner);
+    item.split = normalizeSplit(input.split, item.owner);
   }
   function applyAmount(item, basis, amount) {
     if (basis === "yearly") {
@@ -648,8 +798,11 @@
       yearly: 0,
       startDate: input.startDate || null,
       endDate: input.endDate || null,
-      updatedAt: nowIso
+      updatedAt: nowIso,
+      owner: "daniel",
+      split: 100
     };
+    applyOwner(item, input);
     applyAmount(item, input.basis, input.amount);
     group.items.push(item);
     clearDeclared(group);
@@ -666,6 +819,7 @@
     found.item.startDate = input.startDate || null;
     found.item.endDate = input.endDate || null;
     found.item.updatedAt = nowIso;
+    applyOwner(found.item, input);
     applyAmount(found.item, input.basis, input.amount);
     if (target !== found.group) {
       found.group.items = found.group.items.filter((item) => item.id !== itemId);
@@ -699,6 +853,13 @@
   }
   function markReviewed(dataset, today, nowIso) {
     dataset.reviewedAt = today;
+    dataset.updatedAt = nowIso;
+  }
+  function setBudgets(dataset, budgets, nowIso) {
+    dataset.budgets = {
+      daniel: budgetOrNull(budgets.daniel),
+      lourdes: budgetOrNull(budgets.lourdes)
+    };
     dataset.updatedAt = nowIso;
   }
 
@@ -776,7 +937,8 @@
     prevMonthly: 0,
     prevYearly: 0,
     enterId: null,
-    flashId: null
+    flashId: null,
+    filter: "ambos"
   };
   var ICONS = {
     lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
@@ -897,6 +1059,71 @@
     const names = state.session.dataset.groups.map((group) => group.name);
     return `<datalist id="group-list">${names.map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist>`;
   }
+  function filterSwitch() {
+    const current = state.filter || "ambos";
+    return `<div class="seg" role="group" aria-label="Ver por titular">${[
+      ["ambos", "Ambos"],
+      ["daniel", "Daniel"],
+      ["lourdes", "Lourdes"]
+    ].map(([value, label]) => `<button type="button" class="seg-btn" data-action="filter" data-who="${value}" aria-pressed="${current === value}">${label}</button>`).join("")}</div>`;
+  }
+  function ownerChip(item) {
+    const share = personShare(item);
+    if (share.owner === "shared") {
+      const daniel = Math.round(share.split);
+      return `<span class="owner-chip" data-owner="shared">Compartido ${daniel}/${100 - daniel}</span>`;
+    }
+    return `<span class="owner-chip" data-owner="${share.owner}">${ownerLabel(share.owner)}</span>`;
+  }
+  function comparisonHtml(summary) {
+    const people = summary.people;
+    const rows = (summary.compareGroups || []).filter((group) => group.daniel > 0 || group.lourdes > 0);
+    const max = Math.max(1, ...rows.map((group) => Math.max(group.daniel, group.lourdes)));
+    const diff = people.difference;
+    const same = Math.abs(Math.round(diff * 100)) === 0;
+    const diffText = same ? "Pagan lo mismo al mes." : diff > 0 ? `Daniel paga ${formatEuro(diff)} m\xE1s al mes (${formatEuro(diff * 12)} al a\xF1o).` : `Lourdes paga ${formatEuro(-diff)} m\xE1s al mes (${formatEuro(-diff * 12)} al a\xF1o).`;
+    const budgets = state.session.dataset.budgets || {};
+    const budgetValue = (value) => value == null ? "" : String(value).replace(".", ",");
+    return `<section class="panel compare" id="comparacion">
+      <div class="panel-head">
+        <h2>Daniel y Lourdes</h2>
+        ${filterSwitch()}
+      </div>
+      <div class="compare-people">
+        <article data-owner="daniel">
+          <p class="eyebrow">Daniel</p>
+          <strong>${esc(formatEuro(people.daniel))}</strong>
+          <span>${esc(formatEuro(people.danielYear))} / a\xF1o \xB7 ${Math.round(people.danielPct)} % del total</span>
+        </article>
+        <article data-owner="lourdes">
+          <p class="eyebrow">Lourdes</p>
+          <strong>${esc(formatEuro(people.lourdes))}</strong>
+          <span>${esc(formatEuro(people.lourdesYear))} / a\xF1o \xB7 ${Math.round(people.lourdesPct)} % del total</span>
+        </article>
+      </div>
+      <p class="compare-diff">${esc(diffText)}</p>
+      <p class="compare-legend"><span class="dot daniel"></span> Daniel <span class="dot lourdes"></span> Lourdes</p>
+      <div class="compare-rows">${rows.length ? rows.map((group, index) => `<div class="compare-row">
+            <span class="compare-name">${esc(group.name)}</span>
+            <div class="pair" aria-hidden="true">
+              <span class="pair-track"><span class="pair-fill daniel" style="--w:${group.daniel / max * 100}%;--d:${index * 45}ms"></span></span>
+              <span class="pair-track"><span class="pair-fill lourdes" style="--w:${group.lourdes / max * 100}%;--d:${index * 45 + 70}ms"></span></span>
+            </div>
+            <span class="compare-amt">${esc(formatEuro(group.daniel))}</span>
+            <span class="compare-amt">${esc(formatEuro(group.lourdes))}</span>
+          </div>`).join("") : `<p class="empty">Todav\xEDa no hay gastos activos que comparar.</p>`}</div>
+      <form id="budget-form" class="budget-form">
+        <label class="field">Presupuesto de Daniel
+          <input id="budget-daniel" inputmode="decimal" placeholder="Sin tope" value="${esc(budgetValue(budgets.daniel))}">
+        </label>
+        <label class="field">Presupuesto de Lourdes
+          <input id="budget-lourdes" inputmode="decimal" placeholder="Sin tope" value="${esc(budgetValue(budgets.lourdes))}">
+        </label>
+        <button type="submit" class="btn btn-ghost">Guardar presupuestos</button>
+      </form>
+      <p class="hint">El presupuesto es mensual y opcional. Un gasto compartido se parte con el porcentaje de esa l\xEDnea. Vac\xEDo quiere decir sin tope.</p>
+    </section>`;
+  }
   function appHtml() {
     const { summary, warnings, session } = state;
     const dataset = session.dataset;
@@ -928,10 +1155,16 @@
           ${warnings.some((warning) => warning.code === "stale") ? `<li><button type="button" class="btn btn-ghost" data-action="review">${icon("check")} Marcar como revisados</button></li>` : ""}
         </ul>
       </div>` : `<div class="panel panel-calm"><h2>${icon("check")} Sin incoherencias</h2><p>Importes, nombres, fechas y subtotales cuadran con las reglas de revisi\xF3n.</p></div>`;
+    const filter = state.filter || "ambos";
     const cards = dataset.groups.length ? dataset.groups.map((group, index) => {
-      const stats = summary.groups[index];
-      const items = group.items.map((item) => {
+      const visibleItems = group.items.filter((item) => itemVisible(item, filter));
+      if (filter !== "ambos" && visibleItems.length === 0) return "";
+      const stats = summary.groups.find((entry) => entry.id === group.id) || { monthly: 0, yearly: 0, daniel: 0, lourdes: 0 };
+      const items = visibleItems.map((item) => {
         const ended = !isActive(item, todayISO());
+        const share = personShare(item);
+        const shownMonthly = filter === "daniel" ? share.daniel : filter === "lourdes" ? share.lourdes : item.monthly;
+        const shownYearly = filter === "daniel" ? share.danielYear : filter === "lourdes" ? share.lourdesYear : item.yearly;
         const classes = [
           "item",
           ended ? "is-ended" : "",
@@ -942,12 +1175,12 @@
               <div class="item-inner">
                 <div class="item-main">
                   <div>
-                    <h3>${esc(item.name)} ${ended ? '<span class="badge">De baja</span>' : ""}</h3>
-                    <p class="meta">${icon("calendar")} Alta ${esc(formatDate(item.startDate))} \xB7 Baja ${esc(formatDate(item.endDate))} \xB7 Cambio ${esc(formatDate(item.updatedAt))}</p>
+                    <h3>${esc(item.name)} ${ownerChip(item)} ${ended ? '<span class="badge">De baja</span>' : ""}</h3>
+                    <p class="meta">${icon("calendar")} Alta ${esc(formatDate(item.startDate))} \xB7 Baja ${esc(formatDate(item.endDate))} \xB7 Cambio ${esc(formatDate(item.updatedAt))}${share.owner === "shared" ? ` \xB7 Daniel ${esc(formatEuro(share.daniel))} \xB7 Lourdes ${esc(formatEuro(share.lourdes))}` : ""}</p>
                   </div>
                   <div class="item-money">
-                    <strong>${esc(formatEuro(item.monthly))}<span> / mes</span></strong>
-                    <span>${esc(formatEuro(item.yearly))} / a\xF1o</span>
+                    <strong>${esc(formatEuro(shownMonthly))}<span> / mes</span></strong>
+                    <span>${esc(formatEuro(shownYearly))} / a\xF1o</span>
                   </div>
                 </div>
                 <div class="item-actions">
@@ -961,7 +1194,7 @@
       return `<section class="card" id="group-${esc(group.id)}" data-tone="${index % 8}">
           <header class="card-head">
             <div><p class="eyebrow">Grupo</p><h2>${esc(group.name)}</h2></div>
-            <div class="card-total"><span>Total / mes</span><strong>${esc(formatEuro(stats.monthly))}</strong><small>${esc(formatEuro(stats.yearly))} / a\xF1o</small></div>
+            <div class="card-total"><span>Total / mes</span><strong>${esc(formatEuro(stats.monthly))}</strong><small>${esc(formatEuro(stats.yearly))} / a\xF1o</small><small>Daniel ${esc(formatEuro(stats.daniel))} \xB7 Lourdes ${esc(formatEuro(stats.lourdes))}</small></div>
           </header>
           ${items || `<p class="empty">Este grupo est\xE1 vac\xEDo.</p>`}
           ${group.items.length === 0 ? `<button type="button" class="btn btn-ghost" data-action="delete-group" data-id="${esc(group.id)}">Eliminar grupo</button>` : ""}
@@ -985,9 +1218,10 @@
       ${banner ? `<p class="banner">${esc(banner)}</p>` : ""}
       <section class="hero">
         <div>
-          <p class="eyebrow">Total del mes</p>
+          <p class="eyebrow">${filter === "daniel" ? "Parte de Daniel" : filter === "lourdes" ? "Parte de Lourdes" : "Total del mes"}</p>
           <p class="total-figure" data-count="month" aria-live="polite">${esc(formatEuro(state.prevMonthly))}</p>
           <p class="total-side">Total a\xF1o <strong data-count="year">${esc(formatEuro(state.prevYearly))}</strong> <span>total mes \xD7 12</span></p>
+          ${filter !== "ambos" ? `<p class="hint">Total de la casa: ${esc(formatEuro(summary.householdMonthly))} al mes.</p>` : ""}
           ${yearDiff ? `<p class="hint">La suma de los costes anuales de cada l\xEDnea es ${esc(formatEuro(summary.yearlyItems))}.</p>` : ""}
         </div>
         <div class="hero-chart">
@@ -995,6 +1229,7 @@
           <p class="hint">${summary.activeCount} activos \xB7 ${summary.itemCount - summary.activeCount} de baja \xB7 ${dataset.groups.length} grupos. Los totales se recalculan al momento.</p>
         </div>
       </section>
+      ${comparisonHtml(summary)}
       <div class="split">
         ${warningHtml}
         <section class="panel">
@@ -1009,8 +1244,8 @@
   }
   function paint() {
     const today = todayISO();
-    state.summary = summarize(state.session.dataset, today);
-    state.warnings = collectWarnings(state.session.dataset, today);
+    state.summary = summarize(state.session.dataset, today, state.filter || "ambos");
+    state.warnings = collectWarnings(state.session.dataset, today).filter((warning) => warningVisible(warning, state.filter || "ambos"));
     const html = appHtml();
     state.enterId = null;
     state.flashId = null;
@@ -1100,6 +1335,16 @@
     <label class="field">Importe
       <input name="amount" required inputmode="decimal" value="${esc(amountText)}" placeholder="0,00">
     </label>
+    <fieldset class="choice">
+      <legend>Titular</legend>
+      <label><input type="radio" name="owner" value="daniel" ${(item?.owner || "daniel") === "daniel" ? "checked" : ""}> Daniel</label>
+      <label><input type="radio" name="owner" value="lourdes" ${item?.owner === "lourdes" ? "checked" : ""}> Lourdes</label>
+      <label><input type="radio" name="owner" value="shared" ${item?.owner === "shared" ? "checked" : ""}> Compartido</label>
+    </fieldset>
+    <label class="field" id="split-field" ${item?.owner === "shared" ? "" : "hidden"}>Parte de Daniel (%)
+      <input name="split" inputmode="decimal" value="${esc(String(item?.owner === "shared" ? item.split ?? 50 : 50).replace(".", ","))}">
+      <span class="hint" id="split-hint"></span>
+    </label>
     <div class="dates">
       <label class="field">Alta
         <input name="start" type="date" value="${esc(item?.startDate || "")}">
@@ -1127,6 +1372,8 @@
     const amount = parseAmount(form.amount.value);
     const startDate = form.start.value || null;
     const endDate = form.end.value || null;
+    const owner = form.owner?.value === "lourdes" || form.owner?.value === "shared" ? form.owner.value : "daniel";
+    const split = owner === "shared" ? parseAmount(form.split?.value) : null;
     const errors = [];
     if (!name) errors.push("Escribe un nombre.");
     if (name.length > 80) errors.push("El nombre es demasiado largo.");
@@ -1135,19 +1382,36 @@
     else if (amount < 0) errors.push("El importe tiene que ser cero o mayor.");
     else if (amount > 1e7) errors.push("El importe es demasiado grande.");
     if (startDate && endDate && endDate < startDate) errors.push("La baja es anterior al alta.");
-    return { name, group, basis, amount, startDate, endDate, errors };
+    if (owner === "shared" && (split == null || split < 0 || split > 100)) errors.push("El reparto de Daniel es un porcentaje entre 0 y 100.");
+    return { name, group, basis, amount, startDate, endDate, owner, split, errors };
   }
   function updatePreview() {
     const form = document.getElementById("expense-form");
     const preview = document.getElementById("amount-preview");
     if (!form || !preview) return;
     const { basis, amount } = formPayload(form);
+    const owner = form.owner?.value === "lourdes" || form.owner?.value === "shared" ? form.owner.value : "daniel";
+    const splitField = document.getElementById("split-field");
+    if (splitField) splitField.hidden = owner !== "shared";
     if (amount == null || amount < 0) {
       preview.textContent = "El total del mes se actualiza al guardar.";
       return;
     }
     const monthly = basis === "yearly" ? amount / 12 : amount;
-    preview.textContent = `Sumar\xE1 ${formatEuro(monthly)} al mes y ${formatEuro(basis === "yearly" ? amount : amount * 12)} al a\xF1o.`;
+    const yearly = basis === "yearly" ? amount : amount * 12;
+    if (owner === "shared") {
+      const split = parseAmount(form.split?.value);
+      const danielPart = split == null ? null : Math.min(100, Math.max(0, split));
+      const hint = document.getElementById("split-hint");
+      if (hint && danielPart != null) hint.textContent = `Lourdes se queda con ${String(100 - danielPart).replace(".", ",")} %.`;
+      if (danielPart == null) {
+        preview.textContent = "El reparto es el porcentaje de Daniel.";
+        return;
+      }
+      preview.textContent = `Daniel ${formatEuro(monthly * danielPart / 100)} al mes y Lourdes ${formatEuro(monthly * (100 - danielPart) / 100)}. En total, ${formatEuro(monthly)} al mes y ${formatEuro(yearly)} al a\xF1o.`;
+      return;
+    }
+    preview.textContent = `${ownerLabel(owner)} sumar\xE1 ${formatEuro(monthly)} al mes y ${formatEuro(yearly)} al a\xF1o.`;
   }
   async function commit(mutator) {
     const backup = structuredClone(state.session.dataset);
@@ -1196,6 +1460,7 @@
     state.prevMonthly = 0;
     state.prevYearly = 0;
     state.forceSetup = false;
+    state.filter = "ambos";
     paintGate();
   }
   async function unlock(password) {
@@ -1355,6 +1620,31 @@
       }
       return;
     }
+    if (form.id === "budget-form") {
+      event.preventDefault();
+      if (!state.session) return;
+      const daniel = parseAmount(document.getElementById("budget-daniel").value);
+      const lourdes = parseAmount(document.getElementById("budget-lourdes").value);
+      const danielEmpty = document.getElementById("budget-daniel").value.trim() === "";
+      const lourdesEmpty = document.getElementById("budget-lourdes").value.trim() === "";
+      if (!danielEmpty && (daniel == null || daniel < 0)) {
+        toast("El presupuesto de Daniel no es un importe v\xE1lido.");
+        return;
+      }
+      if (!lourdesEmpty && (lourdes == null || lourdes < 0)) {
+        toast("El presupuesto de Lourdes no es un importe v\xE1lido.");
+        return;
+      }
+      const saved = await commit((dataset) => setBudgets(dataset, {
+        daniel: danielEmpty ? null : daniel,
+        lourdes: lourdesEmpty ? null : lourdes
+      }, nowISO()));
+      if (saved) {
+        paint();
+        toast("Presupuestos guardados.");
+      }
+      return;
+    }
     if (form.id === "expense-form") {
       event.preventDefault();
       const payload = formPayload(form);
@@ -1384,6 +1674,11 @@
     const button = event.target.closest("[data-action]");
     if (!button) return;
     const action = button.dataset.action;
+    if (action === "filter") {
+      state.filter = button.dataset.who || "ambos";
+      if (state.session) paint();
+      return;
+    }
     if (action === "theme") {
       applyTheme(button.dataset.mode);
       document.querySelectorAll(".seg-btn").forEach((el) => {
@@ -1650,7 +1945,7 @@
         const name = document.getElementById("setup-file-name");
         if (name) name.textContent = event.target.files?.[0]?.name || "Hoja con columnas Servicio, Coste / mes y Coste / a\xF1o.";
       }
-      if (event.target.name === "basis") updatePreview();
+      if (event.target.name === "basis" || event.target.name === "owner" || event.target.name === "split") updatePreview();
     });
     ["pointerdown", "keydown", "touchstart", "scroll"].forEach((type) => {
       window.addEventListener(type, poke, { passive: true });
